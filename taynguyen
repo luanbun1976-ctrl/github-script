@@ -1,0 +1,180 @@
+# mobile_adapter.py
+# Mobile device adaptation layer for Cerberus-AimBot
+
+import subprocess
+import time
+import re
+from typing import Optional, Tuple
+
+class MobileAdapter:
+    """Adapts Cerberus-AimBot for mobile platforms"""
+    
+    def __init__(self, platform: str = "android"):
+        self.platform = platform
+        self.device_id = None
+        self.screen_resolution = (1080, 2400)  # Default
+        self.touch_method = "adb"  # or "scrcpy" or "minitouch"
+        
+    def connect_to_device(self) -> bool:
+        """Connect to mobile device or emulator"""
+        if self.platform == "android":
+            return self._connect_android()
+        elif self.platform == "ios":
+            return self._connect_ios()
+        else:
+            print(f"[-] Unsupported platform: {self.platform}")
+            return False
+            
+    def _connect_android(self) -> bool:
+        """Connect to Android device via ADB"""
+        try:
+            # Check ADB devices
+            result = subprocess.run(['adb', 'devices'], 
+                                   capture_output=True, text=True)
+            
+            # Parse device list
+            lines = result.stdout.strip().split('\n')[1:]  # Skip first line
+            devices = []
+            
+            for line in lines:
+                if line.strip():
+                    device_id = line.split('\t')[0]
+                    devices.append(device_id)
+                    
+            if not devices:
+                print("[-] No Android devices found")
+                return False
+                
+            # Use first device
+            self.device_id = devices[0]
+            print(f"[+] Connected to Android device: {self.device_id}")
+            
+            # Get screen resolution
+            resolution = self._get_screen_resolution()
+            if resolution:
+                self.screen_resolution = resolution
+                print(f"[+] Screen resolution: {self.screen_resolution}")
+                
+            return True
+            
+        except FileNotFoundError:
+            print("[-] ADB not found. Please install Android Platform Tools")
+            return False
+            
+    def _get_screen_resolution(self) -> Optional[Tuple[int, int]]:
+        """Get device screen resolution via ADB"""
+        try:
+            cmd = ['adb', '-s', self.device_id, 'shell', 'wm', 'size']
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            # Parse output like "Physical size: 1080x2400"
+            match = re.search(r'(\d+)x(\d+)', result.stdout)
+            if match:
+                width = int(match.group(1))
+                height = int(match.group(2))
+                return (width, height)
+        except:
+            pass
+            
+        return None
+        
+    def tap_screen(self, x: int, y: int, duration: float = 0.05):
+        """Execute a tap on the mobile screen"""
+        if self.platform == "android" and self.device_id:
+            self._android_tap(x, y, duration)
+        elif self.platform == "ios":
+            self._ios_tap(x, y, duration)
+            
+    def _android_tap(self, x: int, y: int, duration: float):
+        """Tap on Android device using ADB"""
+        try:
+            # Convert coordinates to string
+            x_str = str(int(x))
+            y_str = str(int(y))
+            
+            # Execute tap command
+            cmd = ['adb', '-s', self.device_id, 'shell', 'input', 'tap', x_str, y_str]
+            subprocess.run(cmd, check=False)
+            
+            # Sleep for tap duration
+            time.sleep(duration)
+            
+        except Exception as e:
+            print(f"[-] Tap failed: {e}")
+            
+    def swipe_screen(self, x1: int, y1: int, x2: int, y2: int, 
+                    duration_ms: int = 100):
+        """Swipe on mobile screen (for aiming)"""
+        if self.platform == "android" and self.device_id:
+            try:
+                cmd = [
+                    'adb', '-s', self.device_id, 'shell',
+                    'input', 'swipe',
+                    str(x1), str(y1), str(x2), str(y2),
+                    str(duration_ms)
+                ]
+                subprocess.run(cmd, check=False)
+            except Exception as e:
+                print(f"[-] Swipe failed: {e}")
+                
+    def capture_mobile_screen(self) -> Optional[bytes]:
+        """Capture screenshot from mobile device"""
+        if self.platform == "android" and self.device_id:
+            try:
+                # Save screenshot to device
+                temp_path = f"/sdcard/screenshot_{int(time.time())}.png"
+                cmd_save = ['adb', '-s', self.device_id, 'shell', 
+                           'screencap', '-p', temp_path]
+                subprocess.run(cmd_save, check=False)
+                
+                # Pull screenshot to computer
+                local_path = f"screenshot_{int(time.time())}.png"
+                cmd_pull = ['adb', '-s', self.device_id, 'pull', 
+                           temp_path, local_path]
+                subprocess.run(cmd_pull, check=False)
+                
+                # Read the image
+                with open(local_path, 'rb') as f:
+                    return f.read()
+                    
+            except Exception as e:
+                print(f"[-] Screen capture failed: {e}")
+                
+        return None
+
+# Mobile integration with main detector
+class MobilePortalDetector(PortalDetector):
+    """Portal detector optimized for mobile platforms"""
+    
+    def __init__(self, mobile_adapter: MobileAdapter):
+        super().__init__(mode=DetectionMode.FUSION)
+        self.mobile_adapter = mobile_adapter
+        self.is_mobile = True
+        
+    def aim_at_portal_mobile(self, portal_rect: Tuple[int, int, int, int]):
+        """Mobile-optimized aiming using touch controls"""
+        x, y, w, h = portal_rect
+        portal_center_x = x + w // 2
+        portal_center_y = y + h // 2
+        
+        # Convert to mobile screen coordinates
+        mobile_width, mobile_height = self.mobile_adapter.screen_resolution
+        screen_width, screen_height = self.screen_width, self.screen_height
+        
+        touch_x = portal_center_x * mobile_width / screen_width
+        touch_y = portal_center_y * mobile_height / screen_height
+        
+        # Add prediction offset
+        if len(self.detection_history) > 2:
+            dx, dy = self.calculate_aim_vector(portal_rect)
+            
+            # Convert mouse movement to touch coordinates
+            touch_dx = dx * mobile_width / screen_width
+            touch_dy = dy * mobile_height / screen_height
+            
+            # Apply to touch coordinates
+            touch_x += touch_dx
+            touch_y += touch_dy
+            
+        # Execute touch
+        self.mobile_adapter.tap_screen(int(touch_x), int(touch_y))
